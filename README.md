@@ -5,6 +5,14 @@
 ## YOLOV8
 In This Part Try to Benchmark between Small model and Nano model with Variety Method e.g. Detection, Pose Estimate, Tracking
 
+## Package Installation
+
+```
+pip install ultralytics
+```
+
+**Note** All package Install via ultralytics package for more info: [Ultralytics Github](https://github.com/ultralytics/ultralytics)
+
 ## Benchmark GPU, CPU, Time Execution
 
 ### **Detection**
