@@ -5,14 +5,14 @@ import random
 from skeleton_map import skeleton_map
 import torch
 
-os.chdir("obo-mlcv-script/datasets/safety-szm9y_test-h11yv_3")
+os.chdir("datasets/safety")
 
 current_dir = os.getcwd()
 
 
-test_dir = current_dir + "/test_demo"
-train_dir = current_dir + "/train_demo"
-valid_dir = current_dir + "/valid_demo"
+test_dir = current_dir + "/test"
+train_dir = current_dir + "/train"
+valid_dir = current_dir + "/valid"
 
 
 def get_random_color(class_id):
@@ -68,6 +68,10 @@ def draw_annotation(images_dir, labels_dir):
                 for i in range(0, len(keypoint_data), 2):
                     kpt_x = float(keypoint_data[i]) * width  
                     kpt_y = float(keypoint_data[i + 1]) * height
+                    kpt_x = int(kpt_x)
+                    kpt_y = int(kpt_y)
+                    if kpt_x == 0 and kpt_y == 0:
+                        continue
                     keypoints.append([kpt_x, kpt_y])
                     image = cv2.circle(image, (int(kpt_x), int(kpt_y)), 3, (255, 0, 0), 2)  
                 for skeleton in skeletons:
@@ -92,37 +96,12 @@ def draw_annotation(images_dir, labels_dir):
 def get_model():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using: {device}")
-    model = YOLO("../../../internship/model/yolov8s-pose.pt")
+    model = YOLO("../../internship/model/yolov8n-pose.pt")
     model.fuse()
     model.to(device)
 
     return model
 
-
-def update_annotation(label_comp, class_id=7):
-    
-    updated_annotations = []
-
-    if not label_comp or not all(len(x) == 2 for x in label_comp):
-        print("Error: Invalid label_comp structure")
-        return updated_annotations  
-
-    boxes = label_comp[0][0]
-    kpt_list = label_comp[0][1]
-
-    new_annotation = f"{class_id} {boxes[0]} {boxes[1]} {boxes[2]} {boxes[3]}"
-
-    for kpt in kpt_list:
-        if len(kpt) < 2:
-            print("Warning: Keypoint has insufficient data")
-            continue
-        kpt_x, kpt_y = kpt[0], kpt[1]
-        if kpt_x == 0 and kpt_y == 0:
-            continue
-        new_annotation += f" {kpt_x} {kpt_y}"
-
-    updated_annotations.append(new_annotation)
-    return updated_annotations
 
 
 def label_kpt(images_dir, labels_dir):
@@ -145,22 +124,56 @@ def label_kpt(images_dir, labels_dir):
 
         label_comp = []
         for r in results:
-            boxes_n = r.boxes.xywhn[0].numpy()
-            xy_n = r.keypoints.xyn[0].numpy()
-            label_comp.append([boxes_n, xy_n])
+            if r.boxes.cls.numpy() != []:          
+                xy_n = r.keypoints.xyn[0].numpy()
+                label_comp.append(xy_n)
+            else:
+                continue
 
         with open(label_file, 'r') as file:
             annotations = file.readlines()
 
         updated_annotations = []
+
+        # Loop through each annotation
         for annotation in annotations:
             parts = annotation.strip().split()
             class_id = int(parts[0])
+            x, y, w, h = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
 
-            if class_id == 7:  #
-                updated_annotations.extend(update_annotation(label_comp, class_id))
-            else:
-                updated_annotations.append(annotation.strip())
+            # Default length for annotations with zeros
+            zeros_length = 34  # Adjust as needed
+
+            # If it's class_id 6, ensure label_comp has expected structure
+            if class_id == 6:
+                if label_comp and len(label_comp[0]) > 0:
+                    kpt_list = label_comp[0]  # Extract keypoints
+
+                    # Default annotation with bounding box
+                    default_annotation = f"{class_id} {x} {y} {w} {h}"
+
+                    # Create a new annotation with keypoints
+                    new_annotation = ""
+                    for kpt in kpt_list:
+                        if len(kpt) < 2:
+                            print("Warning: Keypoint has insufficient data")
+                            continue
+                        kpt_x, kpt_y = kpt[0], kpt[1]
+                        new_annotation += f" {kpt_x} {kpt_y}"  # Append keypoints
+
+                    updated_annotations.append(default_annotation + new_annotation)
+                else:
+                    # If label_comp is empty or invalid, create a default annotation with zeros
+                    zeros = " ".join(["0"] * zeros_length)
+                    default_annotation = f"{class_id} {x} {y} {w} {h} {zeros}"
+                    updated_annotations.append(default_annotation)
+
+            else:  # If not class_id 6, create a default annotation with zeros
+                zeros = " ".join(["0"] * zeros_length)
+                default_annotation = f"{class_id} {x} {y} {w} {h} {zeros}"
+                updated_annotations.append(default_annotation)
+
+
 
         with open(label_file, 'w') as file:
             for updated_annotation in updated_annotations:
@@ -170,4 +183,9 @@ def label_kpt(images_dir, labels_dir):
         
 
 # label_kpt(test_dir + "/images", test_dir + "/labels")
+# label_kpt(train_dir + "/images", train_dir + "/labels")
+# label_kpt(valid_dir + "/images", valid_dir + "/labels")
+
 # draw_annotation(test_dir + "/images", test_dir + "/labels")
+# draw_annotation(train_dir + "/images", train_dir + "/labels")
+# draw_annotation(valid_dir + "/images", valid_dir + "/labels")
