@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.ops import xywh2ltwh
@@ -257,18 +256,17 @@ class BYTETracker:
         lost_stracks = []
         removed_stracks = []
 
-        scores = results.boxes.cpu().conf
-        bboxes = results.boxes.cpu().xywh
+        scores = results.boxes.cpu().numpy().conf
+        bboxes = results.boxes.cpu().numpy().xywh
         # Add index
         bboxes = np.concatenate([bboxes, np.arange(len(bboxes)).reshape(-1, 1)], axis=-1)
-        cls = results.boxes.cpu().cls
+        cls = results.boxes.cpu().numpy().cls
 
         remain_inds = scores > self.args.track_high_thresh
         inds_low = scores > self.args.track_low_thresh
         inds_high = scores < self.args.track_high_thresh
 
         inds_second = np.logical_and(inds_low, inds_high)
-        inds_second = inds_second.bool()
 
         dets_second = bboxes[inds_second]
         dets = bboxes[remain_inds]
