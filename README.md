@@ -92,5 +92,5 @@ python3 path/to/script/label_annotated.py --model path/to/model --images_dir pat
 --- 
 ## Example Inference with multi Class Pose-Detection
 
-![multi class pose-detect gif](assets/demo_vdo/multi_pose_detect/Pose%20detect%20video.gif)
+![multi class pose-detect gif](assets/demo_vdo/multi_pose_detect/safety-pose.gif)
 
