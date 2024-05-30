@@ -1,13 +1,12 @@
 import numpy as np
-import torch
 from ultralytics.utils import LOGGER
 from ultralytics.utils.ops import xywh2ltwh
 from lib.tracker.basetrack import BaseTrack, TrackState
 from lib.tracker import matching
 from lib.tracker.kalman_filter import KalmanFilterXYAH
-from lib.fast_reid.fastreid.config import get_cfg
-from lib.fast_reid.fastreid.modeling import build_model
-from lib.fast_reid.fastreid.utils.checkpoint import Checkpointer
+from lib.fast_reid.fast_reid_interface import FastReIDInterface
+from collections import deque
+
 
 class STrack(BaseTrack):
     """
@@ -43,7 +42,7 @@ class STrack(BaseTrack):
 
     shared_kalman = KalmanFilterXYAH()
 
-    def __init__(self, xywh, score, cls):
+    def __init__(self, xywh, score, cls, features=None,feat_history = 50):
         """Initialize new STrack instance."""
         super().__init__()
         # xywh+idx or xywha+idx
@@ -58,6 +57,23 @@ class STrack(BaseTrack):
         self.cls = cls
         self.idx = xywh[-1]
         self.angle = xywh[4] if len(xywh) == 6 else None
+        self.curr_feat = None
+        self.smooth_feat = None
+        if features is not None:
+            self.update_features(features)
+        self.features = deque([], maxlen=feat_history)
+        self.alpha = 0.9
+
+
+    def update_features(self, feat):
+        feat /= np.linalg.norm(feat)
+        self.curr_feat = feat
+        if self.smooth_feat is None:
+            self.smooth_feat = feat
+        else:
+            self.smooth_feat = self.alpha * self.smooth_feat + (1 - self.alpha) * feat
+        self.features.append(feat)
+        self.smooth_feat /= np.linalg.norm(self.smooth_feat)
 
     def predict(self):
         """Predicts mean and covariance using Kalman filter."""
@@ -118,6 +134,8 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.convert_coords(new_track.tlwh)
         )
+        if new_track.curr_feat is not None:
+            self.update_features(new_track.curr_feat)
         self.tracklet_len = 0
         self.state = TrackState.Tracked
         self.is_activated = True
@@ -144,6 +162,8 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.convert_coords(new_tlwh)
         )
+        if new_track.curr_feat is not None:
+            self.update_features(new_track.curr_feat)
         self.state = TrackState.Tracked
         self.is_activated = True
 
@@ -249,11 +269,9 @@ class BYTETrackerReID:
         self.max_time_lost = int(frame_rate / 30.0 * args.track_buffer)
         self.kalman_filter = self.get_kalmanfilter()
         self.reset_id()
-
-        self.reid_cfg = self.setup_cfg("scripts/lib/fast_reid/configs/Base-bagtricks.yml", "scripts/lib/fast_reid/model/Duke-Bot-R50.pth")
-        self.reid_model = build_model(self.reid_cfg)
-        Checkpointer(self.reid_model).load(self.reid_cfg.MODEL.WEIGHTS)
-        self.reid_model.eval()
+        self.encoder = FastReIDInterface("scripts/lib/fast_reid/configs/Base-bagtricks.yml", "scripts/lib/fast_reid/model/Duke-Bot-R50.pth", device="cpu")
+        self.proximity_thresh = 0.5
+        self.appearance_thresh = 0.25
 
     def update(self, results, img=None):
         """Updates object tracker with new detections and returns tracked object bounding boxes."""
@@ -282,10 +300,7 @@ class BYTETrackerReID:
         scores_second = scores[inds_second]
         cls_keep = cls[remain_inds]
         cls_second = cls[inds_second]
-
-        img_crops = [img[int(bbox[1]):int(bbox[1]+bbox[3]), int(bbox[0]):int(bbox[0]+bbox[2])] for bbox in dets]
-        features = self.extract_features(img_crops)
-
+        features = self.encoder.inference(img, dets)
         detections = self.init_track(dets, scores_keep, cls_keep, features)
         
         # Add newly detected tracklets to tracked_stracks
@@ -305,7 +320,16 @@ class BYTETrackerReID:
             STrack.multi_gmc(strack_pool, warp)
             STrack.multi_gmc(unconfirmed, warp)
 
+        # compute distance
         dists = self.get_dists(strack_pool, detections)
+        iou_dist = dists
+        ious_dists_mask = (iou_dist > 30)
+        emb_dists = matching.embedding_distance(strack_pool, detections) / 2.0
+        raw_emb_dists = emb_dists.copy()
+        emb_dists[emb_dists > self.appearance_thresh] = 1.0
+        emb_dists[ious_dists_mask] = 1.0
+        dists = np.minimum(iou_dist, emb_dists)
+
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
@@ -339,8 +363,20 @@ class BYTETrackerReID:
                 track.mark_lost()
                 lost_stracks.append(track)
         # Deal with unconfirmed tracks, usually tracks with only one beginning frame
+
+        # compute dist reID
         detections = [detections[i] for i in u_detection]
         dists = self.get_dists(unconfirmed, detections)
+        ious_dists = matching.iou_distance(unconfirmed, detections)
+        ious_dists_mask = (ious_dists > self.proximity_thresh)
+        emb_dists = matching.embedding_distance(unconfirmed, detections) / 2.0
+        raw_emb_dists = emb_dists.copy()
+        emb_dists[emb_dists > self.appearance_thresh] = 1.0
+        emb_dists[ious_dists_mask] = 1.0
+        dists = np.minimum(ious_dists, emb_dists)
+
+
+
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)
@@ -386,13 +422,10 @@ class BYTETrackerReID:
     def get_dists(self, tracks, detections):
         """Calculates the distance between tracks and detections using IoU and fuses scores."""
         dists = matching.iou_distance(tracks, detections)
-        track_features = np.array([track.features for track in tracks])
-        detection_features = np.array([det.features for det in detections])
-        
-        appearance_dists = matching.appearance_distance(track_features, detection_features)
-        
-        combined_dists = dists + appearance_dists * self.args.appearance_weight
-        return combined_dists
+        # TODO: mot20
+        # if not self.args.mot20:
+        dists = matching.fuse_score(dists, detections)
+        return dists
 
     def multi_predict(self, tracks):
         """Returns the predicted tracks using the YOLOv8 network."""
@@ -456,17 +489,3 @@ class BYTETrackerReID:
         resa = [t for i, t in enumerate(stracksa) if i not in dupa]
         resb = [t for i, t in enumerate(stracksb) if i not in dupb]
         return resa, resb
-    
-
-    def setup_cfg(self,config_file, model_weights):
-        cfg = get_cfg()
-        cfg.merge_from_file(config_file)
-        cfg.MODEL.WEIGHTS = model_weights
-        cfg.freeze()
-        return cfg
-
-    def extract_features(self, img_crops):
-        img_crops = torch.stack([torch.tensor(img).cuda() for img in img_crops])
-        with torch.no_grad():
-            features = self.reid_model(img_crops)
-        return features.cpu().numpy()
